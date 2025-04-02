@@ -3,7 +3,21 @@ import numpy as np
 import math
 import socket
 def main():
-    cap = cv2.VideoCapture("https://192.168.242.217:8080/video")
+    cap = cv2.VideoCapture("arena.mp4")
+    ESP8266_IP = "192.168.242.138"  
+    ESP8266_PORT = 12345           
+
+    # Create a UDP socket
+    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    # Store the perspective transformation matrix globally
+    global transformation_matrix
+    transformation_matrix = None
+
+    def send_command(error):
+        """Send a command to the ESP8266 via UDP"""
+        message = f"{error}"
+        udp_socket.sendto(message.encode(), (ESP8266_IP, ESP8266_PORT))
         
     while True:
         ret, image = cap.read()
@@ -11,43 +25,73 @@ def main():
             print("Failed to receive frame")
             break
 
-        # Process the image
-        processed_binary, processed_contours = process(test(image))
+        # Process the image and get the warped frame along with the transformation matrix
+        warped_frame, transformation_matrix = test(image, return_matrix=True)
+        
+        # Process the warped frame
+        processed_binary, processed_contours = process(warped_frame)
 
         # Resize the images
         width, height = 600, 600
         resized_binary = cv2.resize(processed_binary, (width, height), interpolation=cv2.INTER_AREA)
         resized_contours = cv2.resize(processed_contours, (width, height), interpolation=cv2.INTER_AREA)
 
-        bot_info = get_bot_position(resized_contours)
+        # Get bot position in original frame
+        bot_info = get_bot_position(image)
 
-        if bot_info:
-            center_x, center_y = map(int, bot_info["position"])
+        if bot_info and transformation_matrix is not None:
+            orig_center_x, orig_center_y = map(int, bot_info["position"])
             orientation = bot_info["orientation"]
+            
+            # Transform bot position to warped frame coordinates
+            warped_position = transform_coordinates((orig_center_x, orig_center_y), transformation_matrix)
+            center_x, center_y = warped_position
+            
+            # Adjust for the resize operation (500x500 to 600x600)
+            center_x = int(center_x * (600/500))
+            center_y = int(center_y * (600/500))
             
             # Draw the bot position and direction
             cv2.circle(resized_contours, (center_x, center_y), 10, (0, 0, 255), -1)  # Red dot at bot position
+            
+            # Transform orientation vector points to get correct direction in warped frame
+            # Create a point at some distance in the direction of orientation
+            direction_x = orig_center_x + 50 * np.cos(np.radians(orientation))
+            direction_y = orig_center_y + 50 * np.sin(np.radians(orientation))
+            
+            # Transform this point to the warped frame
+            warped_direction = transform_coordinates((direction_x, direction_y), transformation_matrix)
+            warped_direction_x = int(warped_direction[0] * (600/500))
+            warped_direction_y = int(warped_direction[1] * (600/500))
+            
+            # Calculate new orientation in warped frame
+            warped_orientation = np.degrees(np.arctan2(warped_direction_y - center_y, 
+                                                      warped_direction_x - center_x))
+            
+            # Draw the direction arrow
             arrow_length = 50
-            end_x = int(center_x + arrow_length * np.cos(np.radians(orientation)))
-            end_y = int(center_y + arrow_length * np.sin(np.radians(orientation)))
+            end_x = int(center_x + arrow_length * np.cos(np.radians(warped_orientation)))
+            end_y = int(center_y + arrow_length * np.sin(np.radians(warped_orientation)))
             cv2.arrowedLine(resized_contours, (center_x, center_y), (end_x, end_y), (255, 0, 0), 3)
-            cv2.putText(resized_contours, f"Angle: {orientation:.2f}", (center_x + 20, center_y - 20),
+            cv2.putText(resized_contours, f"Angle: {warped_orientation:.2f}", (center_x + 20, center_y - 20),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             
             # Continue processing that depends on bot position
             a, r = c(resized_binary)
-            print(a)
+            # print(a)
             cv2.circle(resized_contours, (a[0], a[1]), 10, (0, 0, 255), -1)
-            t = calculate_target_point((center_x, center_y), 230,a)
-            error=calculate_cross_track_error(a,t,(center_x,center_y))
-            print("error: ",error)
+            t = calculate_target_point((center_x, center_y), 230, a)
+            error = calculate_cross_track_error(a, t, (center_x, center_y))
+            # print("error: ", error)
             cv2.circle(resized_contours, (int(t[0]), int(t[1])), 10, (0, 255, 0), -1)
-            print("bot coord: ",(center_x,center_y),"angle: ",orientation,"target: ", t)
+            # print("bot coord: ", (center_x, center_y), "angle: ", warped_orientation, "target: ", t)
             
-            udp(error)
+            print(f"Sent: {int(error)}")
+            send_command(int(error))
+
             
         else:
-            print("No bot detected")
+            # print("No bot detected or transformation matrix not available")
             # Optionally, you can skip further processing that depends on bot position
             # Or set default values for center_x and center_y if needed.
             a, r = c(resized_binary)
@@ -58,33 +102,14 @@ def main():
         # Display the processed images
         cv2.imshow("Binary", resized_binary)
         cv2.imshow("Contours", resized_contours)
-
+        
         # Wait for a key press to exit
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
             
     cap.release()
     cv2.destroyAllWindows()
-
-def udp(error):
-    # ESP8266 IP and Port
-    ESP8266_IP = "192.168.114.138"  
-    ESP8266_PORT = 12345           
-
-    # Create a UDP socket
-    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-    def send_command(error):
-        """Send a command to the ESP8266 via UDP"""
-        message = f"{error}"
-        udp_socket.sendto(message.encode(), (ESP8266_IP, ESP8266_PORT))
-        print(f"Sent: {message}")
-    
-    send_command(error) 
-    udp_socket.close()  # Close the socket after sending
-   
-
-    udp_socket.close()  # Close the socket after sending
+    # udp_socket.close()  # Close the socket after sending
 def process(frame):
     # Convert to grayscale and apply Gaussian blur
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -102,16 +127,19 @@ def process(frame):
 
     return binary, contour_frame
 
-def test(frame):
+def test(frame, return_matrix=False):
     aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-    parameters = cv2.aruco.DetectorParameters()
+    parameter = cv2.aruco.DetectorParameters()
     
-    corners, ids, _ = cv2.aruco.detectMarkers(frame, aruco_dict, parameters=parameters)
+    corners, ids, _ = cv2.aruco.detectMarkers(frame, aruco_dict, parameters=parameter)
     if ids is None or len(ids) < 4:
-        print("Not enough markers detected")
-        return frame
-    else:
-        print("yes")
+        # print("Not enough markers detected")
+        if return_matrix:
+            return frame, None
+        else:
+            return frame
+    # else:
+        # print("yes")
     
     marker_corners = {}
     for i in range(len(ids)):
@@ -132,7 +160,33 @@ def test(frame):
     ])
     m = cv2.getPerspectiveTransform(src, dst)
     warped = cv2.warpPerspective(frame, m, (500, 500))
-    return warped
+    
+    if return_matrix:
+        return warped, m
+    else:
+        return warped
+def transform_coordinates(point, M):
+    """
+    Transform coordinates from original frame to warped frame using perspective matrix
+    
+    Args:
+    - point: (x, y) coordinates in the original frame
+    - M: Perspective transformation matrix
+    
+    Returns:
+    - Transformed (x, y) coordinates in the warped frame
+    """
+    # Convert to homogeneous coordinates
+    homogeneous_point = np.array([point[0], point[1], 1.0])
+    
+    # Apply transformation
+    transformed = M.dot(homogeneous_point)
+    
+    # Convert back from homogeneous coordinates to Cartesian coordinates
+    transformed_x = transformed[0] / transformed[2]
+    transformed_y = transformed[1] / transformed[2]
+    
+    return (int(transformed_x), int(transformed_y))
 
 
 def initialize_aruco_detector():
@@ -198,7 +252,7 @@ def calculate_target_point(center, radius, bot_position):
     - center: Circle center coordinates
     - radius: Circle radius
     - bot_position: Current bot position
-    - lookahead_distance: Distance along arc to look ahead
+    
     
     Returns:
     - Target point coordinates
@@ -245,5 +299,5 @@ def calculate_cross_track_error(bot_position, target_point, center):
     # Sign the error based on which side of the line the bot is on
     return -distance 
 
-if __name__ == "__main__":
-    main()
+# from esp8266_udp_motorspeedtest import m
+main()
