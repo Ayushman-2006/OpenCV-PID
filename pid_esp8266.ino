@@ -15,13 +15,16 @@ const int in1 = D1, in2 = D2, pwm1 = D8; // Left Motor
 const int in3 = D7, in4 = D4, pwm2 = D3; // Right Motor
 
 // PID Control Parameters
-float Kp = 0.8;  // Proportional gain
-float Ki = 0;   // Integral gain
-float Kd = 0;   // Derivative gain
+float Kp = 0.5;  // Proportional gain
+float Ki = 0;    // Integral gain
+float Kd = 0;    // Derivative gain
 
 float previousError = 0;
 float integral = 0;
-float baseSpeed = 50;  // Base motor speed percentage
+float baseSpeed = 10;  // Base motor speed percentage
+
+unsigned long lastPacketTime = 0;       // Time when last UDP packet was received
+const unsigned long timeout = 300;      // 300 milliseconds timeout to stop motors
 
 void setup() {
     Serial.begin(115200);
@@ -49,13 +52,12 @@ void setup() {
     digitalWrite(in2, HIGH);
     digitalWrite(in3, LOW);
     digitalWrite(in4, HIGH);
-    
-    // Initialize motors at base speed
-    analogWrite(pwm1, map(baseSpeed, 0, 100, 0, 1023));
-    analogWrite(pwm2, map(baseSpeed, 0, 100, 0, 1023));
+
+    // Start with 0 speed
+    analogWrite(pwm1, 0);
+    analogWrite(pwm2, 0);
 }
 
-// Function to apply PID correction based on cross-track error
 void applyPIDCorrection(float error) {
     float proportional = Kp * error;
     integral += Ki * error;
@@ -64,18 +66,15 @@ void applyPIDCorrection(float error) {
 
     float correction = proportional + integral + derivative;
 
-    // Adjust motor speeds based on correction
     float leftMotorSpeed = baseSpeed - correction;
     float rightMotorSpeed = baseSpeed + correction;
 
-    // Constrain values between 0 and 100%
     leftMotorSpeed = constrain(leftMotorSpeed, 0, 100);
     rightMotorSpeed = constrain(rightMotorSpeed, 0, 100);
 
     int pwmLeft = map(leftMotorSpeed, 0, 100, 0, 1023);
     int pwmRight = map(rightMotorSpeed, 0, 100, 0, 1023);
 
-    // Apply speed control (forward direction only)
     analogWrite(pwm1, pwmLeft);
     analogWrite(pwm2, pwmRight);
 
@@ -88,12 +87,19 @@ void loop() {
         int len = udp.read(packetBuffer, 255);
         if (len > 0) {
             packetBuffer[len] = '\0';
-        }
-        Serial.printf("Received packet: %s\n", packetBuffer);
+            float error = atof(packetBuffer);
+            applyPIDCorrection(error);
 
-        // Process CTE (received as a float value)
-        float error = atof(packetBuffer);
-        Serial.printf("Received CTE: %.2f\n", error);
-        applyPIDCorrection(error);
+            lastPacketTime = millis(); // Update last packet received time
+            Serial.printf("Received packet: %s\n", packetBuffer);
+            Serial.printf("Received CTE: %.2f\n", error);
+        }
+    }
+
+    // Check for timeout and stop motors if no packet received in given time
+    if (millis() - lastPacketTime > timeout) {
+        analogWrite(pwm1, 0);
+        analogWrite(pwm2, 0);
+        Serial.println("No packet received - Motors stopped");
     }
 }
